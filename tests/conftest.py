@@ -25,6 +25,7 @@ GOOD = {
     "patient_dob": "03/14/1968", "ordering_provider_name": "Jordan Reyes, MD",
     "equipment_requested": "E0601 CPAP device; A7030 full face mask", "hcpcs_codes": ["E0601", "a7030"],
     "date_of_service": "2026-10-01", "notes": None,
+    "patient_dob_as_written": "03/14/1968", "date_of_service_as_written": "10/01/2026",
 }
 
 

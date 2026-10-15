@@ -85,7 +85,7 @@ def process(run_id: str) -> None:
         try:
             extract.check_pdf(data)
             raw = call_with_retry(extract.llm_extract, data, step="extract", counter=attempts)
-            fields, missing = extract.normalize(raw)
+            fields, missing = extract.normalize(raw, text=extract.pdf_text(data))
             run.fields, run.missing = fields, missing
             if extract.is_empty_non_order(raw, fields):
                 raise extract.MalformedDocument("Not a DME order: no patient, provider or equipment found")
@@ -123,7 +123,8 @@ def process(run_id: str) -> None:
                 s.commit()
                 notify.send_alert(run, "Order saved but team notification failed", str(exc))
         except extract.MalformedDocument as exc:
-            run.status, run.error = "failed", f"Malformed document: {exc}"
+            # The automation worked; the input was bad. Tracked separately from system failures.
+            run.status, run.error = "rejected", f"Malformed document: {exc}"
             _release_claims(s, run.id)
             s.commit()
             notify.send_alert(run, "Inbound document rejected (malformed)", str(exc))

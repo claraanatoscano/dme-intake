@@ -1,12 +1,12 @@
 """End-to-end behaviour tests. External services (Claude, Airtable, Slack) are faked; everything else is real."""
 import base64
-from datetime import timedelta
+from datetime import date, timedelta
 
 from app import pipeline
 from app.db import Run, SessionLocal, utcnow
 from app.extract import normalize
 
-from .conftest import AUTH, make_pdf
+from .conftest import AUTH, GOOD, make_pdf
 
 
 def post_pdf(client, data, name="order.pdf", channel=None, headers=AUTH):
@@ -91,25 +91,25 @@ def test_different_order_same_patient_is_not_a_duplicate(client, fakes):
 def test_non_pdf_fails_cleanly_and_alerts(client, fakes):
     r = post_pdf(client, b"this is not a pdf", name="note.txt")
     run = get_run(client, r.json()["run_id"])
-    assert run["status"] == "failed" and "Malformed" in run["error"]
+    assert run["status"] == "rejected" and "Malformed" in run["error"]
     assert fakes.extract_calls == 0 and not fakes.records       # no LLM spend, no record
     assert any("alerts" in u and "malformed" in t.lower() for u, t in fakes.messages)
 
 
 def test_truncated_pdf_fails(client, fakes):
     r = post_pdf(client, make_pdf()[:120])
-    assert get_run(client, r.json()["run_id"])["status"] == "failed"
+    assert get_run(client, r.json()["run_id"])["status"] == "rejected"
 
 
 def test_empty_upload_fails(client, fakes):
     r = post_pdf(client, b"")
-    assert get_run(client, r.json()["run_id"])["status"] == "failed"
+    assert get_run(client, r.json()["run_id"])["status"] == "rejected"
 
 
 def test_too_many_pages_rejected_before_llm(client, fakes):
     r = post_pdf(client, make_pdf(pages=45))
     run = get_run(client, r.json()["run_id"])
-    assert run["status"] == "failed" and "pages" in run["error"]
+    assert run["status"] == "rejected" and "pages" in run["error"]
     assert fakes.extract_calls == 0
 
 
@@ -127,7 +127,7 @@ def test_blank_or_unrelated_pdf_is_rejected_without_record(client, fakes):
     fakes.extract_result = {k: None for k in fakes.extract_result} | {"is_dme_order": False, "hcpcs_codes": []}
     r = post_pdf(client, make_pdf())
     run = get_run(client, r.json()["run_id"])
-    assert run["status"] == "failed" and "Not a DME order" in run["error"]
+    assert run["status"] == "rejected" and "Not a DME order" in run["error"]
     assert not fakes.records
     assert any("alerts" in u for u, _ in fakes.messages)
 
@@ -203,7 +203,12 @@ def test_health_turns_failing_after_failed_run(client, fakes):
     assert client.get("/health").json()["automation"] == "Waiting for first order"
     post_pdf(client, make_pdf(marker="ok"))
     assert client.get("/health").json()["automation"] == "Healthy"
-    post_pdf(client, b"junk")
+    post_pdf(client, b"junk")                       # bad input is not a system failure
+    h = client.get("/health").json()
+    assert h["automation"] == "Healthy" and "rejected" in h["detail"]
+    fakes.record_failures = 10                      # a real system failure turns it red
+    fakes.extract_result["patient_last_name"] = "Different"
+    post_pdf(client, make_pdf(marker="boom"))
     assert client.get("/health").json()["automation"] == "Failing"
     assert "Failing" in client.get("/status").text
 
@@ -301,12 +306,12 @@ def test_encrypted_pdf_is_rejected(client, fakes):
     w.write(buf)
     r = post_pdf(client, buf.getvalue(), name="locked.pdf")
     run = get_run(client, r.json()["run_id"])
-    assert run["status"] == "failed" and fakes.extract_calls == 0
+    assert run["status"] == "rejected" and fakes.extract_calls == 0
 
 
 def test_html_disguised_as_pdf(client, fakes):
     r = post_pdf(client, b"<html><body>Sign in to Google Drive</body></html>", name="order.pdf")
-    assert get_run(client, r.json()["run_id"])["status"] == "failed"
+    assert get_run(client, r.json()["run_id"])["status"] == "rejected"
 
 
 def test_very_long_filename_is_safe(client, fakes):
@@ -368,3 +373,23 @@ def test_dashboard_and_api_work_with_no_runs(client):
     assert client.get("/status").status_code == 200
     assert client.get("/api/runs").json() == []
     assert client.get("/runs/doesnotexist").status_code == 404
+
+
+# --- A model that silently "fixes" an impossible date and doesn't quote it (seen live on the sample fax) ---
+def test_unquoted_date_on_scanned_pdf_is_flagged():
+    raw = dict(GOOD, date_of_service="2024-03-01", date_of_service_as_written=None)
+    fields, problems = normalize(raw, today=date(2026, 10, 15), text="")
+    assert any(p.startswith("date_of_service (unconfirmed") for p in problems)
+    assert fields["date_of_service"] == "2024-03-01"  # kept for the reviewer, but the order goes to Needs Review
+
+
+def test_unquoted_date_confirmed_by_pdf_text_is_fine():
+    raw = dict(GOOD, date_of_service="2024-03-01", date_of_service_as_written=None)
+    fields, problems = normalize(raw, today=date(2026, 10, 15), text="Date of service: 3/1/24  Signed")
+    assert problems == []
+
+
+def test_unquoted_date_not_matching_pdf_text_is_flagged():
+    raw = dict(GOOD, date_of_service="2024-03-01", date_of_service_as_written=None)
+    _, problems = normalize(raw, today=date(2026, 10, 15), text="Date of service: 2/30/24")
+    assert any("unconfirmed" in p for p in problems)

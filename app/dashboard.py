@@ -12,6 +12,7 @@ STATUS_STYLE = {
     "duplicate": ("Duplicate (skipped)", "muted"),
     "partial": ("Saved, alert failed", "warn"),
     "failed": ("Failed", "bad"),
+    "rejected": ("Rejected: bad document", "muted"),
     "processing": ("Processing", "info"),
     "received": ("Queued", "info"),
 }
@@ -55,16 +56,20 @@ def health(runs: list) -> tuple[str, str, str]:
 
     day_ago = utcnow() - timedelta(days=1)
     recent = [r for r in runs if aware(r.created_at) >= day_ago and r.status != "duplicate"]
-    finished = [r for r in runs if r.status not in ("duplicate", "received", "processing")]
+    finished = [r for r in runs if r.status not in ("duplicate", "received", "processing", "rejected")]
+    rejected = [r for r in recent if r.status == "rejected"]
+    note = f" {len(rejected)} malformed document(s) rejected and alerted." if rejected else ""
     if not finished:
+        if rejected:
+            return "Healthy", "ok", f"No valid orders processed yet.{note}"
         return "Waiting for first order", "info", "No documents processed yet."
     last = finished[0]
     failures = [r for r in recent if r.status in ("failed", "partial")]
     if last.status == "failed":
         return "Failing", "bad", f"The most recent run failed: {last.error or 'see details'}"
     if failures:
-        return "Degraded", "warn", f"{len(failures)} failed run(s) in the last 24 h. The latest run succeeded."
-    return "Healthy", "ok", "All runs in the last 24 h succeeded."
+        return "Degraded", "warn", f"{len(failures)} failed run(s) in the last 24 h. The latest run succeeded.{note}"
+    return "Healthy", "ok", f"No system failures in the last 24 h.{note}"
 
 
 def render(runs: list, reveal: bool) -> str:
@@ -128,7 +133,8 @@ footer{{color:var(--sub);font-size:12px;margin-top:16px}}
  <div class="card stat"><div class="n">{len(real)}</div><div class="l">Documents processed (last 100)</div></div>
  <div class="card stat"><div class="n">{counts['success']}</div><div class="l">Succeeded</div></div>
  <div class="card stat"><div class="n">{counts['needs_review']}</div><div class="l">Need human review</div></div>
- <div class="card stat"><div class="n">{counts['failed'] + counts['partial']}</div><div class="l">Failed</div></div>
+ <div class="card stat"><div class="n">{counts['failed'] + counts['partial']}</div><div class="l">System failures</div></div>
+ <div class="card stat"><div class="n">{counts['rejected']}</div><div class="l">Bad documents rejected</div></div>
  <div class="card stat"><div class="n">{counts['duplicate']}</div><div class="l">Duplicates blocked</div></div>
 </div>
 <div class="tablewrap"><table><thead><tr><th>Status</th><th>Received ({config.DASHBOARD_TZ.split('/')[-1].replace('_',' ')})</th><th>Channel / file</th>

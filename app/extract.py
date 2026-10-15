@@ -70,7 +70,7 @@ PROMPT = """You are extracting data from an inbound Durable Medical Equipment (D
 Rules:
 - Use ONLY what is written in the document. If a field is missing, illegible, or ambiguous, return null. Never guess.
 - Dates must be YYYY-MM-DD. Convert formats like 03/14/1968.
-- Also copy each date exactly as printed into the *_as_written fields. Never correct an impossible date (e.g. 2/30/24); copy it as written and return null for the YYYY-MM-DD field.
+- Whenever you return a date, you MUST also copy it exactly as printed into its *_as_written field. Never correct an impossible date (e.g. 2/30/24); copy it as written and return null for the YYYY-MM-DD field.
 - date_of_service: use the date explicitly labeled as date of service / DOS / delivery date. If none exists, use the order date and say so in notes. If neither exists, null.
 - ordering_provider_name: the practitioner who ordered/signed, not the supplier.
 - equipment_requested: concise, e.g. "E0601 CPAP device; A7030 full face mask".
@@ -150,7 +150,24 @@ def _clean(value) -> str | None:
     return s or None
 
 
-def normalize(raw: dict, today: date | None = None) -> tuple[dict, list[str]]:
+def pdf_text(data: bytes) -> str:
+    """Text layer of the PDF ('' for scanned faxes). Used to double-check dates the model returns."""
+    try:
+        return " ".join((p.extract_text() or "") for p in PdfReader(io.BytesIO(data)).pages)
+    except Exception:
+        return ""
+
+
+def _date_in_text(d: date, text: str) -> bool:
+    for m in re.finditer(r"\b(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})\b", text):
+        mo, dy, yr = (int(x) for x in m.groups())
+        yr = yr + 2000 if yr < 100 and yr <= (date.today().year % 100) + 1 else (yr + 1900 if yr < 100 else yr)
+        if (yr, mo, dy) == (d.year, d.month, d.day):
+            return True
+    return d.isoformat() in text or d.strftime("%B %d, %Y").replace(" 0", " ") in text or d.strftime("%B %d, %Y") in text
+
+
+def normalize(raw: dict, today: date | None = None, text: str = "") -> tuple[dict, list[str]]:
     """Clean the model output and list what is missing or implausible."""
     today = today or date.today()
     problems: list[str] = []
@@ -174,6 +191,10 @@ def normalize(raw: dict, today: date | None = None) -> tuple[dict, list[str]]:
         elif written and _to_date(written) and raw.get(key) and _to_date(raw.get(key)) != _to_date(written):
             problems.append(f"{label} (model value differs from document: '{written}')")
             raw = {**raw, key: None}
+        elif not written and _to_date(raw.get(key)) and not _date_in_text(_to_date(raw.get(key)), text):
+            # The model gave a date but did not quote it, and the PDF text can't confirm it (e.g. a scanned
+            # fax printed "2/30/24" that the model silently turned into 2024-03-01). Keep it, but flag it.
+            problems.append(f"{label} (unconfirmed: model did not quote the printed date)")
 
     dob = _to_date(raw.get("patient_dob"))
     if dob and (dob > today or (today.year - dob.year) > 120):
