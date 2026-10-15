@@ -4,7 +4,7 @@ Turns inbound DME order PDFs into structured, routed work items: extract fields,
 
 **Live links**
 - Inbound webhook: `POST https://<APP>.onrender.com/webhook/orders` (header `X-API-Key: <KEY>`)
-- Email channel: send a PDF attachment to `<MAKE_MAILHOOK_ADDRESS>`
+- Email channel: send a PDF attachment to 5qj4zlbvholqtlr6fho7hhseh32bsg1w@hook.us2.make.com
 - Status dashboard: `https://<APP>.onrender.com/status`
 - System of record (read-only): `<AIRTABLE_SHARED_VIEW_LINK>`
 
