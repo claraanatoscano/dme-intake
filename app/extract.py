@@ -84,7 +84,6 @@ def llm_extract(data: bytes) -> dict:
     msg = client.messages.create(
         model=config.ANTHROPIC_MODEL,
         max_tokens=1024,
-        temperature=0,
         tools=[TOOL],
         tool_choice={"type": "tool", "name": TOOL["name"]},
         messages=[{
