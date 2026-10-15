@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 
 from . import config, extract, notify, sor
 from .db import DocKey, Run, SessionLocal, utcnow
-from .retry import PermanentError, call_with_retry
+from .retry import PermanentError, call_with_retry, is_transient
 
 log = logging.getLogger("intake.pipeline")
 
@@ -34,6 +34,7 @@ def intake(data: bytes, filename: str, channel: str, replay_of: str | None = Non
     without spending an LLM call."""
     digest = sha256(data)
     file_key = f"file:{digest}"
+    filename = (filename or "document.pdf").replace("\x00", "")[:255]
     with SessionLocal() as s:
         since = utcnow() - timedelta(days=1)
         today_count = s.scalar(select(func.count()).select_from(Run).where(
@@ -86,6 +87,8 @@ def process(run_id: str) -> None:
             raw = call_with_retry(extract.llm_extract, data, step="extract", counter=attempts)
             fields, missing = extract.normalize(raw)
             run.fields, run.missing = fields, missing
+            if extract.is_empty_non_order(raw, fields):
+                raise extract.MalformedDocument("Not a DME order: no patient, provider or equipment found")
             status = "needs_review" if missing else "success"
 
             # Content-level duplicate: same order re-sent as a different file (re-scan, re-fax).
@@ -125,7 +128,7 @@ def process(run_id: str) -> None:
             s.commit()
             notify.send_alert(run, "Inbound document rejected (malformed)", str(exc))
         except Exception as exc:
-            kind = "permanent" if isinstance(exc, PermanentError) else "after retries"
+            kind = "after retries" if is_transient(exc) else "not retryable"
             run.status, run.error = "failed", f"{type(exc).__name__} ({kind}): {exc}"
             _release_claims(s, run.id)
             s.commit()

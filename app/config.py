@@ -33,8 +33,8 @@ PUBLIC_BASE_URL = _env("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
 DASHBOARD_TZ = _env("DASHBOARD_TZ", "America/Chicago")
 
 # --- Guardrails / cost controls ---
-MAX_PDF_MB = float(_env("MAX_PDF_MB", "10"))
-MAX_PAGES = int(_env("MAX_PAGES", "15"))
+MAX_PDF_MB = float(_env("MAX_PDF_MB", "25"))
+MAX_PAGES = int(_env("MAX_PAGES", "40"))
 MAX_RUNS_PER_DAY = int(_env("MAX_RUNS_PER_DAY", "300"))
 STUCK_RUN_MINUTES = int(_env("STUCK_RUN_MINUTES", "10"))
 RETRY_ATTEMPTS = int(_env("RETRY_ATTEMPTS", "4"))

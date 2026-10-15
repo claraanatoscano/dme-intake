@@ -31,7 +31,7 @@ Each call returns a `run_id` and a `status_url`. Results show on the dashboard w
  Direct webhook ─────────┘        │ 1. auth (API key), size/type limits, daily cap
                                   │ 2. SHA-256 file key claimed in Postgres  ──► exact duplicate? return 200 + original record
                                   ▼ 3. 202 Accepted, processing continues in background
-                        PDF checks (is it a PDF? pages ≤ 15?)  ──► malformed? fail + alert, no LLM spend
+                        PDF checks (is it a PDF? pages ≤ 40?)  ──► malformed? fail + alert, no LLM spend
                                   ▼
                         Claude (PDF input, forced tool call = structured JSON, "null, don't guess")
                                   ▼
@@ -60,7 +60,7 @@ Every outbound call (Claude, Airtable, Slack) goes through one retry policy: up 
 
 ## Why the work is split this way
 
-- **Custom Python service (core)**: the requirements that matter most for trust (idempotency with atomic claims, retries with backoff, run history, a public status page, replay) are awkward and costly to do in no-code (operations per step, limited state). In code they are ~600 lines, testable (21 automated tests), and portable.
+- **Custom Python service (core)**: the requirements that matter most for trust (idempotency with atomic claims, retries with backoff, run history, a public status page, replay) are awkward and costly to do in no-code (operations per step, limited state). In code they are ~700 lines, testable (37 automated tests), and portable.
 - **Make (email channel)**: receiving email is commodity plumbing. A Make Mailhook gives an inbox in minutes and forwards attachments to the same webhook, so every channel shares one pipeline and one set of guarantees. Swapping Make for Zapier, Postmark or SendGrid inbound changes nothing downstream.
 - **Claude for extraction**: handles unseen layouts and scanned PDFs without templates. Forced tool calling gives structured output; validation catches what the model gets wrong.
 - **Airtable (system of record)**: readable by non-engineers, easy read-only sharing, stable record deeplinks.
@@ -91,7 +91,7 @@ Every outbound call (Claude, Airtable, Slack) goes through one retry policy: up 
 ## Run locally / tests
 ```bash
 pip install -r requirements.txt
-pytest -q                     # 21 tests: happy path, both channel formats, auth, PHI masking, exact + content duplicates,
+pytest -q                     # 37 tests: happy path, both channel formats, auth, PHI masking, exact + content duplicates,
                               # malformed/empty/truncated/oversized PDFs, needs-review, retries, exhausted retries,
                               # partial failure, replay, stuck-run sweeper, health states
 uvicorn app.main:app --reload

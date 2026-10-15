@@ -98,6 +98,18 @@ async def _read_document(request: Request) -> tuple[bytes, str]:
     return data, name
 
 
+@app.get("/webhook/orders")
+def webhook_help():
+    return {
+        "how_to_use": "POST a PDF to this URL with header X-API-Key.",
+        "formats": ["multipart/form-data with a field named 'file'", "raw body with Content-Type: application/pdf",
+                    "JSON {\"file_url\": \"https://...\"} (Google Drive share links work)",
+                    "JSON {\"content_base64\": \"...\", \"filename\": \"order.pdf\"}"],
+        "example": f'curl -X POST "{config.PUBLIC_BASE_URL}/webhook/orders" -H "X-API-Key: <key>" -F "file=@order.pdf"',
+        "dashboard": f"{config.PUBLIC_BASE_URL}/status",
+    }
+
+
 @app.post("/webhook/orders")
 async def receive_order(request: Request, background: BackgroundTasks):
     if not _authorized(request, config.INTAKE_API_KEY):

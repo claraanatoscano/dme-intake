@@ -107,7 +107,7 @@ def test_empty_upload_fails(client, fakes):
 
 
 def test_too_many_pages_rejected_before_llm(client, fakes):
-    r = post_pdf(client, make_pdf(pages=20))
+    r = post_pdf(client, make_pdf(pages=45))
     run = get_run(client, r.json()["run_id"])
     assert run["status"] == "failed" and "pages" in run["error"]
     assert fakes.extract_calls == 0
@@ -123,8 +123,17 @@ def test_missing_fields_creates_needs_review_record(client, fakes):
     assert any("needs review" in t.lower() for u, t in fakes.messages if "orders" in u)
 
 
-def test_not_a_dme_order_needs_review(client, fakes):
+def test_blank_or_unrelated_pdf_is_rejected_without_record(client, fakes):
     fakes.extract_result = {k: None for k in fakes.extract_result} | {"is_dme_order": False, "hcpcs_codes": []}
+    r = post_pdf(client, make_pdf())
+    run = get_run(client, r.json()["run_id"])
+    assert run["status"] == "failed" and "Not a DME order" in run["error"]
+    assert not fakes.records
+    assert any("alerts" in u for u, _ in fakes.messages)
+
+
+def test_partial_non_order_goes_to_review(client, fakes):
+    fakes.extract_result.update(is_dme_order=False)
     r = post_pdf(client, make_pdf())
     run = get_run(client, r.json()["run_id"])
     assert run["status"] == "needs_review" and run["missing"][0] == "not a DME order"
@@ -206,5 +215,156 @@ def test_normalize_rejects_implausible_dates():
                                  "patient_dob": "2090-01-01", "ordering_provider_name": "X",
                                  "equipment_requested": "E0601", "date_of_service": "13/45/2026"},
                                 today=date(2026, 10, 15))
-    assert fields["patient_dob"] is None and "patient_dob (implausible)" in missing
+    assert fields["patient_dob"] is None and any(m.startswith("patient_dob (implausible") for m in missing)
     assert "date_of_service" in missing
+
+
+# ---------- Contract: our call matches the installed Anthropic SDK ----------
+def test_llm_request_matches_sdk_signature(monkeypatch):
+    """Catches SDK upgrades that remove/rename parameters (this broke once in production)."""
+    import inspect
+    import anthropic
+    from anthropic.resources.messages import Messages
+    from app import extract as ex
+
+    sig = inspect.signature(Messages.create)
+
+    class Block:
+        type = "tool_use"
+        input = {"is_dme_order": True}
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            sig.bind(None, **kwargs)   # raises TypeError on unknown/missing params
+            assert kwargs["tools"][0]["name"] == ex.TOOL["name"]
+            return type("Msg", (), {"content": [Block()]})()
+
+    class FakeClient:
+        def __init__(self, **kw):
+            self.messages = FakeMessages()
+
+    monkeypatch.setattr(anthropic, "Anthropic", FakeClient)
+    monkeypatch.setattr(ex.config, "ANTHROPIC_API_KEY", "x")
+    real = ex.__dict__.get("_real_llm_extract") or ex.llm_extract
+    assert real(make_pdf())["is_dme_order"] is True
+
+
+def test_llm_text_json_fallback(monkeypatch):
+    """If the model replies with JSON text instead of a tool call, we still parse it."""
+    import anthropic
+    from app import extract as ex
+
+    class Text:
+        type = "text"
+        text = 'Here you go: {"is_dme_order": true, "patient_last_name": "Curie"}'
+
+    class FakeClient:
+        def __init__(self, **kw):
+            self.messages = type("M", (), {"create": lambda self, **k: type("Msg", (), {"content": [Text()]})()})()
+
+    monkeypatch.setattr(anthropic, "Anthropic", FakeClient)
+    monkeypatch.setattr(ex.config, "ANTHROPIC_API_KEY", "x")
+    assert ex._real_llm_extract(make_pdf())["patient_last_name"] == "Curie"
+
+
+def test_impossible_printed_date_is_flagged_not_corrected():
+    """The sample fax says 2/30/24; the model may 'fix' it to 2024-03-01. We must not trust that."""
+    from datetime import date
+    raw = {"is_dme_order": True, "patient_first_name": "Marie", "patient_last_name": "Curie",
+           "patient_dob": "1900-12-05", "patient_dob_as_written": "12/05/1900",
+           "ordering_provider_name": "Arjun Raj, DPM", "equipment_requested": "L3020 arch supports",
+           "date_of_service": "2024-03-01", "date_of_service_as_written": "2/30/24"}
+    fields, missing = normalize(raw, today=date(2026, 10, 15))
+    assert fields["date_of_service"] is None
+    assert any("invalid as written" in m and "2/30/24" in m for m in missing)
+    assert fields["patient_dob"] is None            # born 1900 = over 120 years old -> human review
+
+
+def test_valid_printed_date_passes():
+    from datetime import date
+    raw = {"is_dme_order": True, "patient_first_name": "A", "patient_last_name": "B", "patient_dob": "1968-03-14",
+           "patient_dob_as_written": "03/14/1968", "ordering_provider_name": "X", "equipment_requested": "E0601",
+           "date_of_service": "2026-10-01", "date_of_service_as_written": "10/01/2026"}
+    fields, missing = normalize(raw, today=date(2026, 10, 15))
+    assert missing == [] and fields["date_of_service"] == "2026-10-01"
+
+
+
+# ---------- More edge cases ----------
+def test_encrypted_pdf_is_rejected(client, fakes):
+    import io
+    from pypdf import PdfReader, PdfWriter
+    w = PdfWriter()
+    w.append(PdfReader(io.BytesIO(make_pdf())))
+    w.encrypt("secret")
+    buf = io.BytesIO()
+    w.write(buf)
+    r = post_pdf(client, buf.getvalue(), name="locked.pdf")
+    run = get_run(client, r.json()["run_id"])
+    assert run["status"] == "failed" and fakes.extract_calls == 0
+
+
+def test_html_disguised_as_pdf(client, fakes):
+    r = post_pdf(client, b"<html><body>Sign in to Google Drive</body></html>", name="order.pdf")
+    assert get_run(client, r.json()["run_id"])["status"] == "failed"
+
+
+def test_very_long_filename_is_safe(client, fakes):
+    pdf = make_pdf()
+    long_name = "x" * 600 + ".pdf"
+    r1 = post_pdf(client, pdf, name=long_name)
+    r2 = post_pdf(client, pdf, name=long_name)          # duplicate path also stores the name
+    assert r1.status_code == 202 and r2.status_code == 200
+    assert len(get_run(client, r1.json()["run_id"])["filename"]) <= 255
+
+
+def test_dob_over_120_years_is_flagged():
+    from datetime import date
+    fields, missing = normalize({"is_dme_order": True, "patient_first_name": "Marie", "patient_last_name": "Curie",
+                                 "patient_dob": "1900-12-05", "patient_dob_as_written": "12/05/1900",
+                                 "ordering_provider_name": "X", "equipment_requested": "L3020",
+                                 "date_of_service": "2026-10-01"}, today=date(2026, 10, 15))
+    assert fields["patient_dob"] is None and any("implausible" in m for m in missing)
+
+
+def test_hcpcs_codes_as_string_are_split():
+    fields, _ = normalize({"hcpcs_codes": "e0601, A7030"})
+    assert fields["hcpcs_codes"] == ["E0601", "A7030"]
+
+
+def test_rescan_with_invalid_date_still_caught_as_duplicate(client, fakes):
+    fakes.extract_result.update(date_of_service=None, date_of_service_as_written="2/30/24")
+    post_pdf(client, make_pdf(marker="scan-a"))
+    r = post_pdf(client, make_pdf(marker="scan-b"))
+    assert get_run(client, r.json()["run_id"])["status"] == "duplicate"
+    assert len(fakes.records) == 1
+
+
+def test_resend_while_first_still_processing_is_duplicate(fakes):
+    from app import pipeline as pl
+    pdf = make_pdf()
+    run1, go1 = pl.intake(pdf, "a.pdf", "webhook")      # registered, not processed yet
+    run2, go2 = pl.intake(pdf, "a.pdf", "email")
+    assert go1 and not go2 and run2.status == "duplicate" and run2.duplicate_of == run1.id
+
+
+def test_json_file_url_rejects_http_and_missing_fields(client, fakes):
+    assert client.post("/webhook/orders", json={"file_url": "http://insecure"}, headers=AUTH).status_code == 400
+    assert client.post("/webhook/orders", json={"hello": 1}, headers=AUTH).status_code == 400
+    assert client.post("/webhook/orders", content=b"{bad json", headers={**AUTH, "content-type": "application/json"}).status_code == 400
+
+
+def test_multipart_without_file_field(client, fakes):
+    r = client.post("/webhook/orders", files={"note": (None, "hi")}, headers=AUTH)
+    assert r.status_code == 400
+
+
+def test_get_on_webhook_explains_usage(client):
+    body = client.get("/webhook/orders").json()
+    assert "X-API-Key" in body["how_to_use"]
+
+
+def test_dashboard_and_api_work_with_no_runs(client):
+    assert client.get("/status").status_code == 200
+    assert client.get("/api/runs").json() == []
+    assert client.get("/runs/doesnotexist").status_code == 404

@@ -57,9 +57,11 @@ TOOL = {
             "equipment_requested": {"type": ["string", "null"], "description": "Short list of items, with HCPCS codes if shown, separated by '; '"},
             "hcpcs_codes": {"type": "array", "items": {"type": "string"}},
             "date_of_service": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
+            "patient_dob_as_written": {"type": ["string", "null"], "description": "The DOB exactly as printed, character for character"},
+            "date_of_service_as_written": {"type": ["string", "null"], "description": "The date used for date_of_service exactly as printed, even if it is not a real date"},
             "notes": {"type": ["string", "null"], "description": "Anything ambiguous, illegible, or assumed"},
         },
-        "required": ["is_dme_order", *REQUIRED, "hcpcs_codes", "notes"],
+        "required": ["is_dme_order", *REQUIRED, "patient_dob_as_written", "date_of_service_as_written", "hcpcs_codes", "notes"],
     },
 }
 
@@ -68,6 +70,7 @@ PROMPT = """You are extracting data from an inbound Durable Medical Equipment (D
 Rules:
 - Use ONLY what is written in the document. If a field is missing, illegible, or ambiguous, return null. Never guess.
 - Dates must be YYYY-MM-DD. Convert formats like 03/14/1968.
+- Also copy each date exactly as printed into the *_as_written fields. Never correct an impossible date (e.g. 2/30/24); copy it as written and return null for the YYYY-MM-DD field.
 - date_of_service: use the date explicitly labeled as date of service / DOS / delivery date. If none exists, use the order date and say so in notes. If neither exists, null.
 - ordering_provider_name: the practitioner who ordered/signed, not the supplier.
 - equipment_requested: concise, e.g. "E0601 CPAP device; A7030 full face mask".
@@ -110,7 +113,7 @@ def llm_extract(data: bytes) -> dict:
     raise RuntimeError("Model returned no structured output")
 
 
-_DATE_FORMATS = ["%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y", "%B %d, %Y", "%b %d, %Y", "%d %B %Y"]
+_DATE_FORMATS = ["%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y", "%m-%d-%y", "%m.%d.%Y", "%B %d, %Y", "%b %d, %Y", "%d %B %Y"]
 
 
 def _to_date(value) -> date | None:
@@ -125,6 +128,21 @@ def _to_date(value) -> date | None:
     return None
 
 
+def _codes(value) -> list[str]:
+    if isinstance(value, str):
+        value = re.split(r"[,;\s]+", value)
+    if not isinstance(value, list):
+        return []
+    return [c.strip().upper() for c in value if isinstance(c, str) and c.strip()]
+
+
+def is_empty_non_order(raw: dict, fields: dict) -> bool:
+    """Blank pages, invoices, random PDFs: nothing usable at all -> reject, don't create a record."""
+    found = any(fields.get(k) for k in ("patient_first_name", "patient_last_name", "ordering_provider_name",
+                                         "equipment_requested"))
+    return raw.get("is_dme_order") is False and not found
+
+
 def _clean(value) -> str | None:
     if value is None:
         return None
@@ -135,23 +153,35 @@ def _clean(value) -> str | None:
 def normalize(raw: dict, today: date | None = None) -> tuple[dict, list[str]]:
     """Clean the model output and list what is missing or implausible."""
     today = today or date.today()
+    problems: list[str] = []
     out = {
         "patient_first_name": _clean(raw.get("patient_first_name")),
         "patient_last_name": _clean(raw.get("patient_last_name")),
         "ordering_provider_name": _clean(raw.get("ordering_provider_name")),
         "equipment_requested": _clean(raw.get("equipment_requested")),
-        "hcpcs_codes": [c.strip().upper() for c in (raw.get("hcpcs_codes") or []) if isinstance(c, str) and c.strip()],
+        "hcpcs_codes": _codes(raw.get("hcpcs_codes")),
         "notes": _clean(raw.get("notes")),
         "patient_dob": None,
         "date_of_service": None,
     }
-    problems: list[str] = []
+
+    # Guard against the model "fixing" an impossible printed date (e.g. 2/30/24 -> 2024-03-01).
+    for key, label in (("patient_dob", "patient_dob"), ("date_of_service", "date_of_service")):
+        written = _clean(raw.get(f"{key}_as_written"))
+        if written and _to_date(written) is None and re.search(r"\d", written):
+            problems.append(f"{label} (invalid as written: '{written}')")
+            raw = {**raw, key: None}
+        elif written and _to_date(written) and raw.get(key) and _to_date(raw.get(key)) != _to_date(written):
+            problems.append(f"{label} (model value differs from document: '{written}')")
+            raw = {**raw, key: None}
 
     dob = _to_date(raw.get("patient_dob"))
-    if dob and (dob.year < 1900 or dob > today):
-        problems.append("patient_dob (implausible)")
+    if dob and (dob > today or (today.year - dob.year) > 120):
+        problems.append(f"patient_dob (implausible: {dob.isoformat()})")
         dob = None
     out["patient_dob"] = dob.isoformat() if dob else None
+    out["patient_dob_as_written"] = _clean(raw.get("patient_dob_as_written"))
+    out["date_of_service_as_written"] = _clean(raw.get("date_of_service_as_written"))
 
     dos = _to_date(raw.get("date_of_service"))
     if dos and (dos.year < 2000 or (dos - today).days > 366):
@@ -169,7 +199,9 @@ def normalize(raw: dict, today: date | None = None) -> tuple[dict, list[str]]:
 
 def content_key(fields: dict) -> str | None:
     """Same patient + DOB + date of service + equipment = same order, even if the file bytes differ."""
-    parts = [fields.get("patient_last_name"), fields.get("patient_dob"), fields.get("date_of_service"),
+    parts = [fields.get("patient_last_name"),
+             fields.get("patient_dob") or fields.get("patient_dob_as_written"),
+             fields.get("date_of_service") or fields.get("date_of_service_as_written"),
              fields.get("equipment_requested")]
     if not all(parts):
         return None
