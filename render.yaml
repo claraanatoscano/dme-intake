@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: dme-intake
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: INTAKE_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SOR_BACKEND
+        value: airtable
+      - key: AIRTABLE_TOKEN
+        sync: false
+      - key: AIRTABLE_BASE_ID
+        sync: false
+      - key: AIRTABLE_TABLE_ID
+        sync: false
+      - key: ORDERS_WEBHOOK_URL
+        sync: false
+      - key: ALERTS_WEBHOOK_URL
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
