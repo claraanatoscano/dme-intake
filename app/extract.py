@@ -1,6 +1,7 @@
 """PDF checks + LLM field extraction + validation/normalization."""
 import base64
 import io
+import json
 import re
 from datetime import date, datetime
 
@@ -85,7 +86,7 @@ def llm_extract(data: bytes) -> dict:
         model=config.ANTHROPIC_MODEL,
         max_tokens=1024,
         tools=[TOOL],
-        tool_choice={"type": "tool", "name": TOOL["name"]},
+        tool_choice={"type": "auto"},  # newer models reject forced tool choice; the prompt requires the call
         messages=[{
             "role": "user",
             "content": [
@@ -98,6 +99,14 @@ def llm_extract(data: bytes) -> dict:
     for block in msg.content:
         if getattr(block, "type", None) == "tool_use":
             return dict(block.input)
+    # Fallback: the model answered in text. Accept a JSON object if it contains one.
+    text = "".join(getattr(b, "text", "") for b in msg.content)
+    match = re.search(r"\{.*\}", text, re.S)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except ValueError:
+            pass
     raise RuntimeError("Model returned no structured output")
 
 
@@ -166,3 +175,6 @@ def content_key(fields: dict) -> str | None:
         return None
     norm = [re.sub(r"[^a-z0-9]", "", p.lower()) for p in parts]
     return "content:" + "|".join(norm)[:280]
+
+
+_real_llm_extract = llm_extract  # used by the SDK contract test
