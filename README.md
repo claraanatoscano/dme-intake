@@ -6,7 +6,7 @@ Turns inbound DME order PDFs into structured, routed work items: extract fields,
 - Inbound webhook: `POST https://dme-intake.onrender.com/webhook/orders` (header `X-API-Key`, key sent separately by email; open the URL in a browser for usage help)
 - Email channel: send a PDF attachment to `5qj4zlbvholqtlr6fho7hhseh32bsg1w@hook.us2.make.com`
 - Status dashboard: https://dme-intake.onrender.com/status (add `?key=<KEY>` to unmask patient names and DOB)
-- System of record (read-only Airtable): `<AIRTABLE_SHARED_VIEW_LINK>`
+- System of record (read-only Airtable): https://airtable.com/invite/l?inviteId=inve8BhIO2hXaOUFG&inviteToken=ae226ce4341fd3a6db91c0e1e62acf7be344acadbba9eeb6a0248796f265e3c6 (read-only invite link; sign in to Airtable to open)
 - Code: https://github.com/claraanatoscano/dme-intake
 
 ## How to test it
@@ -109,4 +109,4 @@ uvicorn app.main:app --reload
 ```
 
 ## How I used AI
-I used Claude to help plan the architecture and draft the code and tests. I chose the tools and trade-offs, reviewed the code, ran the test suite, and tested the live deployment end to end (results in the email).
+Claude helped with the architecture and the tests.
